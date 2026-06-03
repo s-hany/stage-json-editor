@@ -7,13 +7,36 @@ import {
   FileInput,
   Grid2X2,
   PaintBucket,
+  Redo2,
   RotateCcw,
+  Undo2,
 } from 'lucide-react'
 import './App.css'
 
-type CellSymbol = 'W' | 'R' | 'G' | 'B' | 'X'
+type ColorSymbol = 'W' | 'R' | 'G' | 'B'
+type BaseCellSymbol = ColorSymbol | 'X' | 'LR' | 'LG' | 'LB' | 'LW'
+type CellSymbol = BaseCellSymbol | `LW${number}`
+type BrushSymbol = ColorSymbol | 'X'
 type BoardName = 'initial' | 'target'
+type Direction = 'left' | 'up' | 'right'
 type Grid = CellSymbol[][]
+
+type CellKind = 'normal' | 'blocker' | 'lock'
+
+type CellState = {
+  kind: CellKind
+  color: ColorSymbol
+  locked: boolean
+  remaining: number
+}
+
+type SelectedCell = {
+  board: BoardName
+  row: number
+  col: number
+}
+
+type ColorAssignment = Record<Direction, Exclude<ColorSymbol, 'W'>>
 
 type StageJson = {
   gridSize: number
@@ -21,10 +44,13 @@ type StageJson = {
   target: Array<{ cells: CellSymbol[] }>
 }
 
-const symbols: CellSymbol[] = ['W', 'R', 'G', 'B', 'X']
+const brushSymbols: BrushSymbol[] = ['W', 'R', 'G', 'B', 'X']
+const colorSymbols: ColorSymbol[] = ['W', 'R', 'G', 'B']
+const lockedColorSymbols: Array<Exclude<ColorSymbol, 'W'>> = ['R', 'G', 'B']
+const initialAssignment: ColorAssignment = { left: 'R', up: 'B', right: 'G' }
 
 const cellMeta: Record<
-  CellSymbol,
+  BrushSymbol | 'LOCK',
   { label: string; short: string; className: string }
 > = {
   W: { label: 'White', short: 'W', className: 'cell-white' },
@@ -32,23 +58,24 @@ const cellMeta: Record<
   G: { label: 'Green', short: 'G', className: 'cell-green' },
   B: { label: 'Blue', short: 'B', className: 'cell-blue' },
   X: { label: 'Blocker', short: 'X', className: 'cell-blocker' },
+  LOCK: { label: 'Lock', short: 'L', className: 'cell-lock' },
 }
 
 const sampleStage: StageJson = {
   gridSize: 5,
   initial: [
-    { cells: ['X', 'X', 'W', 'X', 'X'] },
-    { cells: ['X', 'X', 'W', 'X', 'X'] },
     { cells: ['W', 'W', 'W', 'W', 'W'] },
-    { cells: ['X', 'X', 'W', 'X', 'X'] },
-    { cells: ['X', 'X', 'W', 'X', 'X'] },
+    { cells: ['W', 'W', 'W', 'W', 'W'] },
+    { cells: ['W', 'W', 'LW2', 'LW7', 'W'] },
+    { cells: ['W', 'W', 'W', 'W', 'W'] },
+    { cells: ['W', 'W', 'W', 'W', 'W'] },
   ],
   target: [
-    { cells: ['X', 'X', 'R', 'X', 'X'] },
-    { cells: ['X', 'X', 'R', 'X', 'X'] },
-    { cells: ['G', 'G', 'R', 'G', 'G'] },
-    { cells: ['X', 'X', 'R', 'X', 'X'] },
-    { cells: ['X', 'X', 'R', 'X', 'X'] },
+    { cells: ['W', 'W', 'W', 'W', 'W'] },
+    { cells: ['W', 'W', 'W', 'W', 'W'] },
+    { cells: ['W', 'W', 'LG', 'W', 'W'] },
+    { cells: ['W', 'W', 'W', 'W', 'W'] },
+    { cells: ['W', 'W', 'W', 'W', 'W'] },
   ],
 }
 
@@ -68,6 +95,89 @@ function makeGrid(size: number, source?: Grid): Grid {
 
 function resizeGrid(grid: Grid, size: number): Grid {
   return makeGrid(size, grid)
+}
+
+function replaceGridCell(grid: Grid, row: number, col: number, symbol: CellSymbol): Grid {
+  return grid.map((line, rowIndex) =>
+    rowIndex === row
+      ? line.map((cell, colIndex) => (colIndex === col ? symbol : cell))
+      : line,
+  )
+}
+
+function fillGrid(size: number, symbol: CellSymbol): Grid {
+  return makeGrid(size).map((row) => row.map(() => symbol))
+}
+
+function normalizeCellSymbol(value: unknown): CellSymbol {
+  const symbol = String(value).trim().toUpperCase()
+
+  if (symbol === 'W' || symbol === 'R' || symbol === 'G' || symbol === 'B' || symbol === 'X') {
+    return symbol
+  }
+
+  if (symbol === 'LR' || symbol === 'LG' || symbol === 'LB') {
+    return symbol
+  }
+
+  if (symbol === 'LW') {
+    return 'LW'
+  }
+
+  const lockMatch = /^LW([1-9]\d*)$/.exec(symbol)
+  if (lockMatch) {
+    return symbol as CellSymbol
+  }
+
+  throw new Error(`unsupported symbol "${String(value)}"`)
+}
+
+function parseCellSymbol(symbol: CellSymbol): CellState {
+  if (symbol === 'X') {
+    return { kind: 'blocker', color: 'W', locked: false, remaining: 0 }
+  }
+
+  if (symbol === 'LR' || symbol === 'LG' || symbol === 'LB') {
+    return { kind: 'lock', color: symbol.slice(1) as Exclude<ColorSymbol, 'W'>, locked: true, remaining: 0 }
+  }
+
+  if (symbol === 'LW' || symbol.startsWith('LW')) {
+    const countText = symbol.slice(2)
+    return {
+      kind: 'lock',
+      color: 'W',
+      locked: false,
+      remaining: countText ? Number(countText) : 1,
+    }
+  }
+
+  return { kind: 'normal', color: symbol as ColorSymbol, locked: false, remaining: 0 }
+}
+
+function cellStateToSymbol(cell: CellState): CellSymbol {
+  if (cell.kind === 'blocker') {
+    return 'X'
+  }
+
+  if (cell.kind === 'lock') {
+    if (cell.locked) {
+      const color = cell.color === 'W' ? 'R' : cell.color
+      return `L${color}` as CellSymbol
+    }
+
+    const count = Math.max(1, Math.floor(cell.remaining || 1))
+    return count === 1 ? 'LW' : (`LW${count}` as CellSymbol)
+  }
+
+  return cell.color
+}
+
+function gridToPreviewGrid(grid: Grid): CellState[][] {
+  return grid.map((row) => row.map((cell) => ({ ...parseCellSymbol(cell) })))
+}
+
+function clonePreviewGrid(grid: CellState[][]): CellState[][] {
+  return grid.map((row) => row.map((cell) => ({ ...cell })))
 }
 
 function validateStageJson(value: unknown): StageJson {
@@ -114,13 +224,12 @@ function validateRows(
 
     return {
       cells: cells.map((cell, colIndex) => {
-        const symbol = String(cell).trim().toUpperCase()
-        if (!symbols.includes(symbol as CellSymbol)) {
-          throw new Error(
-            `${fieldName}[${rowIndex}][${colIndex}] has unsupported symbol "${String(cell)}".`,
-          )
+        try {
+          return normalizeCellSymbol(cell)
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : 'unsupported symbol'
+          throw new Error(`${fieldName}[${rowIndex}][${colIndex}] has ${detail}.`, { cause: error })
         }
-        return symbol as CellSymbol
       }),
     }
   })
@@ -153,17 +262,138 @@ function formatStageJson(stage: StageJson): string {
   ].join('\n')
 }
 
+function getCellClass(symbol: CellSymbol): string {
+  const cell = parseCellSymbol(symbol)
+
+  if (cell.kind === 'blocker') {
+    return cellMeta.X.className
+  }
+
+  if (cell.kind === 'lock') {
+    return `${cellMeta[cell.color].className} cell-lock ${cell.locked ? 'lock-locked' : 'lock-unlocked'}`
+  }
+
+  return cellMeta[cell.color].className
+}
+
+function getCellLabel(symbol: CellSymbol): string {
+  const cell = parseCellSymbol(symbol)
+  if (cell.kind === 'lock') {
+    return cell.locked ? `Locked ${cell.color}` : `Unlocked white lock ${cell.remaining}`
+  }
+  return cell.kind === 'blocker' ? 'Blocker' : cellMeta[cell.color].label
+}
+
+function applyFlowCell(cell: CellState, color: Exclude<ColorSymbol, 'W'>): boolean {
+  if (cell.kind === 'blocker') {
+    return true
+  }
+
+  if (cell.kind === 'lock') {
+    if (cell.locked) {
+      return true
+    }
+
+    cell.color = color
+    cell.remaining -= 1
+
+    if (cell.remaining <= 0) {
+      cell.remaining = 0
+      cell.locked = true
+    }
+
+    return false
+  }
+
+  cell.color = color
+  return false
+}
+
+function paintPreviewGrid(
+  grid: CellState[][],
+  direction: Direction,
+  color: Exclude<ColorSymbol, 'W'>,
+): CellState[][] {
+  const next = clonePreviewGrid(grid)
+  const size = next.length
+
+  if (direction === 'left') {
+    for (let row = 0; row < size; row += 1) {
+      for (let col = 0; col < size; col += 1) {
+        if (applyFlowCell(next[row][col], color)) break
+      }
+    }
+  }
+
+  if (direction === 'right') {
+    for (let row = 0; row < size; row += 1) {
+      for (let col = size - 1; col >= 0; col -= 1) {
+        if (applyFlowCell(next[row][col], color)) break
+      }
+    }
+  }
+
+  if (direction === 'up') {
+    for (let col = 0; col < size; col += 1) {
+      for (let row = 0; row < size; row += 1) {
+        if (applyFlowCell(next[row][col], color)) break
+      }
+    }
+  }
+
+  return next
+}
+
+function rotateAssignmentClockwise(assignment: ColorAssignment): ColorAssignment {
+  return {
+    left: assignment.right,
+    up: assignment.left,
+    right: assignment.up,
+  }
+}
+
+function rotateAssignmentCounterClockwise(assignment: ColorAssignment): ColorAssignment {
+  return {
+    left: assignment.up,
+    up: assignment.right,
+    right: assignment.left,
+  }
+}
+
+function previewMatchesTarget(previewGrid: CellState[][], targetGrid: Grid): boolean {
+  if (previewGrid.length !== targetGrid.length) {
+    return false
+  }
+
+  return previewGrid.every((row, rowIndex) =>
+    row.every((cell, colIndex) => {
+      const target = parseCellSymbol(targetGrid[rowIndex][colIndex])
+      if (cell.kind !== target.kind) {
+        return false
+      }
+      if (cell.kind === 'blocker') {
+        return true
+      }
+      return cell.color === target.color
+    }),
+  )
+}
+
 function App() {
-  const [stageName, setStageName] = useState('Stage01')
+  const [stageName, setStageName] = useState('StageLockSample')
   const [gridSize, setGridSize] = useState(sampleStage.gridSize)
   const [initialGrid, setInitialGrid] = useState<Grid>(() => rowsToGrid(sampleStage.initial))
   const [targetGrid, setTargetGrid] = useState<Grid>(() => rowsToGrid(sampleStage.target))
-  const [brush, setBrush] = useState<CellSymbol>('W')
+  const [brush, setBrush] = useState<BrushSymbol>('W')
   const [activeBoard, setActiveBoard] = useState<BoardName>('initial')
+  const [selectedCell, setSelectedCell] = useState<SelectedCell>({ board: 'initial', row: 0, col: 0 })
   const [isPainting, setIsPainting] = useState(false)
   const [importText, setImportText] = useState('')
   const [importError, setImportError] = useState('')
   const [feedback, setFeedback] = useState('Ready')
+  const [previewGrid, setPreviewGrid] = useState<CellState[][]>(() => gridToPreviewGrid(initialGrid))
+  const [previewHistory, setPreviewHistory] = useState<CellState[][][]>([])
+  const [assignment, setAssignment] = useState<ColorAssignment>(initialAssignment)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const stageJson = useMemo<StageJson>(
@@ -176,71 +406,119 @@ function App() {
   )
 
   const jsonText = useMemo(() => formatStageJson(stageJson), [stageJson])
+  const selectedSymbol = selectedCell.board === 'initial'
+    ? initialGrid[selectedCell.row]?.[selectedCell.col]
+    : targetGrid[selectedCell.row]?.[selectedCell.col]
+  const selectedState = parseCellSymbol(selectedSymbol ?? 'W')
+  const previewMatched = useMemo(
+    () => previewMatchesTarget(previewGrid, targetGrid),
+    [previewGrid, targetGrid],
+  )
   const isValid = !importError
+
+  const markEdited = (message: string) => {
+    setImportError('')
+    setFeedback(message)
+  }
+
+  const resetPreviewTo = (grid: Grid) => {
+    setPreviewGrid(gridToPreviewGrid(grid))
+    setPreviewHistory([])
+  }
 
   const updateGridSize = (nextSize: number) => {
     const safeSize = Math.min(12, Math.max(1, nextSize || 1))
+    const nextInitial = resizeGrid(initialGrid, safeSize)
+    const nextTarget = resizeGrid(targetGrid, safeSize)
     setGridSize(safeSize)
-    setInitialGrid((grid) => resizeGrid(grid, safeSize))
-    setTargetGrid((grid) => resizeGrid(grid, safeSize))
-    setFeedback(`Grid resized to ${safeSize} x ${safeSize}`)
+    setInitialGrid(nextInitial)
+    setTargetGrid(nextTarget)
+    resetPreviewTo(nextInitial)
+    setSelectedCell((cell) => ({
+      ...cell,
+      row: Math.min(cell.row, safeSize - 1),
+      col: Math.min(cell.col, safeSize - 1),
+    }))
+    markEdited(`Grid resized to ${safeSize} x ${safeSize}`)
+  }
+
+  const updateGridCell = (board: BoardName, row: number, col: number, symbol: CellSymbol) => {
+    if (board === 'initial') {
+      const nextGrid = replaceGridCell(initialGrid, row, col, symbol)
+      setInitialGrid(nextGrid)
+      resetPreviewTo(nextGrid)
+      return
+    }
+
+    setTargetGrid((grid) => replaceGridCell(grid, row, col, symbol))
   }
 
   const paintCell = (board: BoardName, row: number, col: number) => {
-    const setter = board === 'initial' ? setInitialGrid : setTargetGrid
-    setter((grid) =>
-      grid.map((line, rowIndex) =>
-        rowIndex === row
-          ? line.map((cell, colIndex) => (colIndex === col ? brush : cell))
-          : line,
-      ),
-    )
+    updateGridCell(board, row, col, brush)
     setActiveBoard(board)
+    setSelectedCell({ board, row, col })
+    markEdited(`${board === 'initial' ? 'Initial' : 'Target'} ${row + 1},${col + 1} set to ${brush}`)
   }
 
   const fillBoard = (board: BoardName) => {
-    const filled = makeGrid(gridSize).map((row) => row.map(() => brush))
+    const filled = fillGrid(gridSize, brush)
     if (board === 'initial') {
       setInitialGrid(filled)
+      resetPreviewTo(filled)
     } else {
       setTargetGrid(filled)
     }
     setActiveBoard(board)
-    setFeedback(`${board === 'initial' ? 'Initial' : 'Target'} filled with ${brush}`)
+    markEdited(`${board === 'initial' ? 'Initial' : 'Target'} filled with ${brush}`)
   }
 
   const clearBoard = (board: BoardName) => {
+    const cleared = makeGrid(gridSize)
     if (board === 'initial') {
-      setInitialGrid(makeGrid(gridSize))
+      setInitialGrid(cleared)
+      resetPreviewTo(cleared)
     } else {
-      setTargetGrid(makeGrid(gridSize))
+      setTargetGrid(cleared)
     }
     setActiveBoard(board)
-    setFeedback(`${board === 'initial' ? 'Initial' : 'Target'} cleared`)
+    markEdited(`${board === 'initial' ? 'Initial' : 'Target'} cleared`)
   }
 
   const copyInitialToTarget = () => {
     setTargetGrid(initialGrid.map((row) => [...row]))
     setActiveBoard('target')
-    setFeedback('Initial copied to Target')
+    markEdited('Initial copied to Target')
   }
 
   const resetSample = () => {
-    setStageName('Stage01')
+    setStageName('StageLockSample')
     setGridSize(sampleStage.gridSize)
-    setInitialGrid(rowsToGrid(sampleStage.initial))
+    const nextInitial = rowsToGrid(sampleStage.initial)
+    setInitialGrid(nextInitial)
     setTargetGrid(rowsToGrid(sampleStage.target))
+    resetPreviewTo(nextInitial)
+    setSelectedCell({ board: 'initial', row: 0, col: 0 })
+    setAssignment(initialAssignment)
     setImportText('')
     setImportError('')
-    setFeedback('Stage01 sample restored')
+    setFeedback('Lock sample restored')
+  }
+
+  const updateSelectedCell = (state: CellState) => {
+    const symbol = cellStateToSymbol(state)
+    updateGridCell(selectedCell.board, selectedCell.row, selectedCell.col, symbol)
+    markEdited(`Selected cell set to ${symbol}`)
   }
 
   const applyImportText = (text: string, importedName?: string) => {
     try {
       const parsed = validateStageJson(JSON.parse(text))
+      const nextInitial = rowsToGrid(parsed.initial)
       setGridSize(parsed.gridSize)
-      setInitialGrid(rowsToGrid(parsed.initial))
+      setInitialGrid(nextInitial)
       setTargetGrid(rowsToGrid(parsed.target))
+      resetPreviewTo(nextInitial)
+      setSelectedCell({ board: 'initial', row: 0, col: 0 })
       setImportError('')
       setImportText(text)
       if (importedName) {
@@ -281,8 +559,32 @@ function App() {
     setFeedback(`${link.download} downloaded`)
   }
 
+  const runPreview = (direction: Direction) => {
+    setPreviewHistory((history) => [...history, clonePreviewGrid(previewGrid)])
+    setPreviewGrid((grid) => paintPreviewGrid(grid, direction, assignment[direction]))
+    setFeedback(`Preview ${direction.toUpperCase()} painted with ${assignment[direction]}`)
+  }
+
+  const resetPreview = () => {
+    setPreviewGrid(gridToPreviewGrid(initialGrid))
+    setPreviewHistory([])
+    setFeedback('Preview reset to Initial')
+  }
+
+  const undoPreview = () => {
+    setPreviewHistory((history) => {
+      const previous = history[history.length - 1]
+      if (!previous) {
+        return history
+      }
+      setPreviewGrid(previous)
+      setFeedback('Preview undo')
+      return history.slice(0, -1)
+    })
+  }
+
   return (
-    <main className="app-shell" onPointerUp={() => setIsPainting(false)}>
+    <main className="app-shell" onPointerUp={() => setIsPainting(false)} onPointerLeave={() => setIsPainting(false)}>
       <header className="topbar">
         <div className="brand-lockup">
           <div className="brand-mark" aria-hidden="true">
@@ -345,7 +647,7 @@ function App() {
             <strong>{brush}</strong>
           </div>
           <div className="palette-grid" role="list" aria-label="Cell symbol palette">
-            {symbols.map((symbol) => (
+            {brushSymbols.map((symbol) => (
               <button
                 key={symbol}
                 type="button"
@@ -360,7 +662,7 @@ function App() {
           </div>
 
           <div className="tool-section">
-            <span className="section-label">Brush Mode</span>
+            <span className="section-label">Brush Board</span>
             <div className="segmented" role="group" aria-label="Active board">
               <button
                 type="button"
@@ -391,14 +693,21 @@ function App() {
             </button>
             <button type="button" className="wide-action subtle" onClick={resetSample}>
               <RotateCcw size={16} />
-              Restore sample
+              Restore lock sample
             </button>
           </div>
 
+          <CellInspector
+            selectedCell={selectedCell}
+            selectedSymbol={selectedSymbol ?? 'W'}
+            selectedState={selectedState}
+            onChange={updateSelectedCell}
+          />
+
           <div className="status-box">
-            <div className="status-line valid">
+            <div className={`status-line ${isValid ? 'valid' : 'invalid'}`}>
               <CheckCircle2 size={16} />
-              <span>Valid</span>
+              <span>{isValid ? 'Valid' : 'Invalid'}</span>
             </div>
             <p>{feedback}</p>
           </div>
@@ -409,21 +718,37 @@ function App() {
             title="Initial"
             board="initial"
             grid={initialGrid}
+            selectedCell={selectedCell}
             isActive={activeBoard === 'initial'}
             isPainting={isPainting}
             onActivate={() => setActiveBoard('initial')}
             onPaint={paintCell}
+            onSelect={(row, col) => setSelectedCell({ board: 'initial', row, col })}
             onStartPaint={() => setIsPainting(true)}
           />
           <EditableBoard
             title="Target"
             board="target"
             grid={targetGrid}
+            selectedCell={selectedCell}
             isActive={activeBoard === 'target'}
             isPainting={isPainting}
             onActivate={() => setActiveBoard('target')}
             onPaint={paintCell}
+            onSelect={(row, col) => setSelectedCell({ board: 'target', row, col })}
             onStartPaint={() => setIsPainting(true)}
+          />
+
+          <PreviewPanel
+            previewGrid={previewGrid}
+            assignment={assignment}
+            matched={previewMatched}
+            canUndo={previewHistory.length > 0}
+            onRun={runPreview}
+            onUndo={undoPreview}
+            onReset={resetPreview}
+            onRotateClockwise={() => setAssignment((current) => rotateAssignmentClockwise(current))}
+            onRotateCounterClockwise={() => setAssignment((current) => rotateAssignmentCounterClockwise(current))}
           />
         </section>
 
@@ -438,7 +763,7 @@ function App() {
             <textarea
               id="importText"
               value={importText}
-              placeholder="Paste Stage01.json or Stage02.json here"
+              placeholder="Paste Stage01.json, Stage03 copy.json, or LW/LW2/LR/LG/LB stage JSON here"
               onChange={(event) => setImportText(event.target.value)}
             />
             <button type="button" className="button secondary" onClick={() => applyImportText(importText)}>
@@ -452,23 +777,151 @@ function App() {
   )
 }
 
+function CellInspector({
+  selectedCell,
+  selectedSymbol,
+  selectedState,
+  onChange,
+}: {
+  selectedCell: SelectedCell
+  selectedSymbol: CellSymbol
+  selectedState: CellState
+  onChange: (state: CellState) => void
+}) {
+  const setKind = (kind: CellKind) => {
+    if (kind === 'blocker') {
+      onChange({ kind: 'blocker', color: 'W', locked: false, remaining: 0 })
+      return
+    }
+
+    if (kind === 'lock') {
+      onChange({ kind: 'lock', color: 'W', locked: false, remaining: 1 })
+      return
+    }
+
+    onChange({ kind: 'normal', color: selectedState.color, locked: false, remaining: 0 })
+  }
+
+  return (
+    <div className="inspector-panel">
+      <div className="panel-heading compact">
+        <span>Inspector</span>
+        <strong>{selectedSymbol}</strong>
+      </div>
+      <p className="selection-label">
+        {selectedCell.board} / row {selectedCell.row + 1} / col {selectedCell.col + 1}
+      </p>
+
+      <span className="section-label">Cell Type</span>
+      <div className="segmented triple" role="group" aria-label="Selected cell type">
+        {(['normal', 'blocker', 'lock'] as CellKind[]).map((kind) => (
+          <button
+            key={kind}
+            type="button"
+            className={selectedState.kind === kind ? 'active' : ''}
+            onClick={() => setKind(kind)}
+          >
+            {kind}
+          </button>
+        ))}
+      </div>
+
+      {selectedState.kind === 'normal' ? (
+        <label className="field inline-field">
+          <span>Color</span>
+          <select
+            value={selectedState.color}
+            onChange={(event) =>
+              onChange({ kind: 'normal', color: event.target.value as ColorSymbol, locked: false, remaining: 0 })
+            }
+          >
+            {colorSymbols.map((color) => (
+              <option key={color} value={color}>{cellMeta[color].label}</option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+
+      {selectedState.kind === 'lock' ? (
+        <>
+          <span className="section-label">Lock State</span>
+          <div className="segmented" role="group" aria-label="Lock state">
+            <button
+              type="button"
+              className={!selectedState.locked ? 'active' : ''}
+              onClick={() => onChange({ kind: 'lock', color: 'W', locked: false, remaining: Math.max(1, selectedState.remaining || 1) })}
+            >
+              Unlocked
+            </button>
+            <button
+              type="button"
+              className={selectedState.locked ? 'active' : ''}
+              onClick={() => onChange({ kind: 'lock', color: selectedState.color === 'W' ? 'R' : selectedState.color, locked: true, remaining: 0 })}
+            >
+              Locked
+            </button>
+          </div>
+
+          {selectedState.locked ? (
+            <label className="field inline-field">
+              <span>Locked Color</span>
+              <select
+                value={selectedState.color === 'W' ? 'R' : selectedState.color}
+                onChange={(event) =>
+                  onChange({ kind: 'lock', color: event.target.value as Exclude<ColorSymbol, 'W'>, locked: true, remaining: 0 })
+                }
+              >
+                {lockedColorSymbols.map((color) => (
+                  <option key={color} value={color}>{cellMeta[color].label}</option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <label className="field inline-field">
+              <span>Remaining</span>
+              <input
+                type="number"
+                min="1"
+                max="99"
+                value={Math.max(1, selectedState.remaining || 1)}
+                onChange={(event) =>
+                  onChange({
+                    kind: 'lock',
+                    color: 'W',
+                    locked: false,
+                    remaining: Math.max(1, Math.floor(Number(event.target.value) || 1)),
+                  })
+                }
+              />
+            </label>
+          )}
+        </>
+      ) : null}
+    </div>
+  )
+}
+
 function EditableBoard({
   title,
   board,
   grid,
+  selectedCell,
   isActive,
   isPainting,
   onActivate,
   onPaint,
+  onSelect,
   onStartPaint,
 }: {
   title: string
   board: BoardName
   grid: Grid
+  selectedCell: SelectedCell
   isActive: boolean
   isPainting: boolean
   onActivate: () => void
   onPaint: (board: BoardName, row: number, col: number) => void
+  onSelect: (row: number, col: number) => void
   onStartPaint: () => void
 }) {
   return (
@@ -487,27 +940,113 @@ function EditableBoard({
         aria-label={`${title} board`}
       >
         {grid.map((row, rowIndex) =>
-          row.map((cell, colIndex) => (
-            <button
-              key={`${rowIndex}-${colIndex}`}
-              type="button"
-              className={`stage-cell ${cellMeta[cell].className}`}
-              onPointerDown={(event) => {
-                event.preventDefault()
-                onStartPaint()
-                onPaint(board, rowIndex, colIndex)
-              }}
-              onPointerEnter={() => {
-                if (isPainting) {
+          row.map((cell, colIndex) => {
+            const isSelected = selectedCell.board === board && selectedCell.row === rowIndex && selectedCell.col === colIndex
+            return (
+              <button
+                key={`${rowIndex}-${colIndex}`}
+                type="button"
+                className={`stage-cell ${getCellClass(cell)} ${isSelected ? 'selected-cell' : ''}`}
+                onPointerDown={(event) => {
+                  event.preventDefault()
+                  onStartPaint()
+                  onSelect(rowIndex, colIndex)
                   onPaint(board, rowIndex, colIndex)
-                }
-              }}
-              role="gridcell"
-              aria-label={`${title} row ${rowIndex + 1} column ${colIndex + 1}: ${cellMeta[cell].label}`}
-            >
-              {cell}
-            </button>
-          )),
+                }}
+                onPointerEnter={() => {
+                  if (isPainting) {
+                    onSelect(rowIndex, colIndex)
+                    onPaint(board, rowIndex, colIndex)
+                  }
+                }}
+                role="gridcell"
+                aria-label={`${title} row ${rowIndex + 1} column ${colIndex + 1}: ${getCellLabel(cell)}`}
+              >
+                <span>{cell}</span>
+              </button>
+            )
+          }),
+        )}
+      </div>
+    </article>
+  )
+}
+
+function PreviewPanel({
+  previewGrid,
+  assignment,
+  matched,
+  canUndo,
+  onRun,
+  onUndo,
+  onReset,
+  onRotateClockwise,
+  onRotateCounterClockwise,
+}: {
+  previewGrid: CellState[][]
+  assignment: ColorAssignment
+  matched: boolean
+  canUndo: boolean
+  onRun: (direction: Direction) => void
+  onUndo: () => void
+  onReset: () => void
+  onRotateClockwise: () => void
+  onRotateCounterClockwise: () => void
+}) {
+  return (
+    <article className="board-card preview-card">
+      <div className="board-header">
+        <div>
+          <h2>Preview</h2>
+          <p>Unity-style Left / Up / Right flow from Initial</p>
+        </div>
+        <span className={matched ? 'match-ok' : 'match-wait'}>{matched ? 'Matches target' : 'Not matched'}</span>
+      </div>
+
+      <div className="preview-controls">
+        <button type="button" className="button secondary" onClick={onRotateCounterClockwise}>
+          <Undo2 size={16} />
+          Q rotate
+        </button>
+        <div className="assignment-strip" aria-label="Color assignment">
+          <span>Left {assignment.left}</span>
+          <span>Up {assignment.up}</span>
+          <span>Right {assignment.right}</span>
+        </div>
+        <button type="button" className="button secondary" onClick={onRotateClockwise}>
+          <Redo2 size={16} />
+          E rotate
+        </button>
+      </div>
+
+      <div className="preview-actions">
+        <button type="button" className="button primary" onClick={() => onRun('left')}>Left / {assignment.left}</button>
+        <button type="button" className="button primary" onClick={() => onRun('up')}>Up / {assignment.up}</button>
+        <button type="button" className="button primary" onClick={() => onRun('right')}>Right / {assignment.right}</button>
+        <button type="button" className="button secondary" disabled={!canUndo} onClick={onUndo}>Undo</button>
+        <button type="button" className="button secondary" onClick={onReset}>Reset</button>
+      </div>
+
+      <div
+        className="stage-grid preview-grid"
+        style={{ '--grid-size': previewGrid.length } as React.CSSProperties}
+        role="grid"
+        aria-label="Preview board"
+      >
+        {previewGrid.map((row, rowIndex) =>
+          row.map((cell, colIndex) => {
+            const symbol = cellStateToSymbol(cell)
+            return (
+              <div
+                key={`${rowIndex}-${colIndex}`}
+                className={`stage-cell preview-cell ${getCellClass(symbol)}`}
+                role="gridcell"
+                aria-label={`Preview row ${rowIndex + 1} column ${colIndex + 1}: ${getCellLabel(symbol)}`}
+              >
+                <span>{cell.kind === 'lock' && !cell.locked ? `L${cell.remaining}` : symbol}</span>
+              </div>
+            )
+          }),
         )}
       </div>
     </article>
