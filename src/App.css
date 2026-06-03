@@ -105,6 +105,7 @@ select {
 
 .button,
 .wide-action,
+.mini-action,
 .segmented button,
 .stage-cell,
 .swatch {
@@ -128,6 +129,12 @@ select {
 .button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.wide-action:disabled,
+.mini-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
 }
 
 .button.primary {
@@ -238,6 +245,10 @@ select {
   margin-top: 18px;
 }
 
+.tool-section.first {
+  margin: 0 0 16px;
+}
+
 .segmented {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -252,6 +263,10 @@ select {
 }
 
 .segmented button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   height: 31px;
   color: var(--text-muted);
   border-radius: 6px;
@@ -264,6 +279,17 @@ select {
   color: var(--text-strong);
   background: #fff;
   box-shadow: 0 2px 8px rgba(36, 51, 59, 0.11);
+}
+
+.mode-switch button {
+  height: 34px;
+}
+
+.shortcut-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .wide-action {
@@ -283,6 +309,12 @@ select {
 .wide-action.subtle {
   color: var(--text-muted);
   background: #f8fafb;
+}
+
+.wide-action.danger {
+  color: #9f2f24;
+  border-color: #f2b8b3;
+  background: #fff7f6;
 }
 
 .status-box {
@@ -332,12 +364,44 @@ select {
     0 18px 40px rgba(34, 53, 63, 0.08);
 }
 
+.board-card.mode-paint .stage-cell {
+  cursor: crosshair;
+}
+
+.board-card.mode-select .stage-cell {
+  cursor: default;
+}
+
 .board-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 14px;
+}
+
+.board-tools {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, max-content));
+  gap: 8px;
+  align-items: center;
+  margin: -4px 0 14px;
+}
+
+.mini-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 720;
+  white-space: nowrap;
 }
 
 .board-header h2 {
@@ -403,6 +467,7 @@ select {
 .stage-cell:focus-visible,
 .button:focus-visible,
 .wide-action:focus-visible,
+.mini-action:focus-visible,
 .swatch:focus-visible,
 .segmented button:focus-visible,
 input:focus-visible,
@@ -503,6 +568,35 @@ textarea:focus-visible {
   margin-top: 18px;
   padding-top: 16px;
   border-top: 1px solid var(--border);
+}
+
+.drafts-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.draft-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.draft-list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.draft-meta,
+.draft-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .panel-heading.compact {
@@ -698,6 +792,11 @@ textarea:focus-visible {
 
   .palette-grid {
     grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .board-tools,
+  .draft-actions {
+    grid-template-columns: 1fr;
   }
 
   .preview-controls,

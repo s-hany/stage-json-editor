@@ -1,14 +1,20 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Brush,
   CheckCircle2,
   Clipboard,
+  CopyPlus,
   Download,
   Eraser,
   FileInput,
+  FolderOpen,
   Grid2X2,
+  MousePointer2,
   PaintBucket,
   Redo2,
   RotateCcw,
+  Save,
+  Trash2,
   Undo2,
 } from 'lucide-react'
 import './App.css'
@@ -20,6 +26,7 @@ type BrushSymbol = ColorSymbol | 'X'
 type BoardName = 'initial' | 'target'
 type Direction = 'left' | 'up' | 'right'
 type Grid = CellSymbol[][]
+type EditorMode = 'select' | 'paint'
 
 type CellKind = 'normal' | 'blocker' | 'lock'
 
@@ -44,10 +51,24 @@ type StageJson = {
   target: Array<{ cells: CellSymbol[] }>
 }
 
+type StageDraft = StageJson & {
+  id: string
+  name: string
+  updatedAt: string
+}
+
+const DRAFT_STORAGE_KEY = 'stage-json-editor:drafts:v1'
 const brushSymbols: BrushSymbol[] = ['W', 'R', 'G', 'B', 'X']
 const colorSymbols: ColorSymbol[] = ['W', 'R', 'G', 'B']
 const lockedColorSymbols: Array<Exclude<ColorSymbol, 'W'>> = ['R', 'G', 'B']
 const initialAssignment: ColorAssignment = { left: 'R', up: 'B', right: 'G' }
+const shortcutBrushes: Record<string, BrushSymbol> = {
+  '1': 'W',
+  '2': 'R',
+  '3': 'G',
+  '4': 'B',
+  '5': 'X',
+}
 
 const cellMeta: Record<
   BrushSymbol | 'LOCK',
@@ -262,6 +283,90 @@ function formatStageJson(stage: StageJson): string {
   ].join('\n')
 }
 
+function createDraftId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function stageToDraft(stage: StageJson, stageName: string, id = createDraftId()): StageDraft {
+  return {
+    id,
+    name: stageName.trim() || 'Untitled Stage',
+    updatedAt: new Date().toISOString(),
+    gridSize: stage.gridSize,
+    initial: gridToRows(rowsToGrid(stage.initial)),
+    target: gridToRows(rowsToGrid(stage.target)),
+  }
+}
+
+function readDraftsFromStorage(): StageDraft[] {
+  if (typeof window === 'undefined') {
+    return []
+  }
+
+  try {
+    const raw = window.localStorage.getItem(DRAFT_STORAGE_KEY)
+    if (!raw) {
+      return []
+    }
+
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+
+    return parsed.flatMap((draft): StageDraft[] => {
+      if (!draft || typeof draft !== 'object') {
+        return []
+      }
+
+      try {
+        const value = draft as Partial<StageDraft>
+        const validated = validateStageJson(value)
+        return [
+          {
+            id: typeof value.id === 'string' ? value.id : createDraftId(),
+            name: typeof value.name === 'string' && value.name.trim() ? value.name : 'Untitled Stage',
+            updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString(),
+            ...validated,
+          },
+        ]
+      } catch {
+        return []
+      }
+    })
+  } catch {
+    return []
+  }
+}
+
+function writeDraftsToStorage(drafts: StageDraft[]) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(drafts))
+  } catch {
+    // Storage can fail in private mode or when quota is full; editing should still work.
+  }
+}
+
+function formatDraftTime(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return 'unknown'
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+}
+
 function getCellClass(symbol: CellSymbol): string {
   const cell = parseCellSymbol(symbol)
 
@@ -384,6 +489,7 @@ function App() {
   const [gridSize, setGridSize] = useState(sampleStage.gridSize)
   const [initialGrid, setInitialGrid] = useState<Grid>(() => rowsToGrid(sampleStage.initial))
   const [targetGrid, setTargetGrid] = useState<Grid>(() => rowsToGrid(sampleStage.target))
+  const [editMode, setEditMode] = useState<EditorMode>('select')
   const [brush, setBrush] = useState<BrushSymbol>('W')
   const [activeBoard, setActiveBoard] = useState<BoardName>('initial')
   const [selectedCell, setSelectedCell] = useState<SelectedCell>({ board: 'initial', row: 0, col: 0 })
@@ -394,6 +500,8 @@ function App() {
   const [previewGrid, setPreviewGrid] = useState<CellState[][]>(() => gridToPreviewGrid(initialGrid))
   const [previewHistory, setPreviewHistory] = useState<CellState[][][]>([])
   const [assignment, setAssignment] = useState<ColorAssignment>(initialAssignment)
+  const [drafts, setDrafts] = useState<StageDraft[]>(() => readDraftsFromStorage())
+  const [activeDraftId, setActiveDraftId] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const stageJson = useMemo<StageJson>(
@@ -415,6 +523,7 @@ function App() {
     [previewGrid, targetGrid],
   )
   const isValid = !importError
+  const activeDraft = drafts.find((draft) => draft.id === activeDraftId)
 
   const markEdited = (message: string) => {
     setImportError('')
@@ -499,6 +608,7 @@ function App() {
     resetPreviewTo(nextInitial)
     setSelectedCell({ board: 'initial', row: 0, col: 0 })
     setAssignment(initialAssignment)
+    setActiveDraftId('')
     setImportText('')
     setImportError('')
     setFeedback('Lock sample restored')
@@ -519,6 +629,7 @@ function App() {
       setTargetGrid(rowsToGrid(parsed.target))
       resetPreviewTo(nextInitial)
       setSelectedCell({ board: 'initial', row: 0, col: 0 })
+      setActiveDraftId('')
       setImportError('')
       setImportText(text)
       if (importedName) {
@@ -583,6 +694,136 @@ function App() {
     })
   }
 
+  const saveDraft = () => {
+    const existingId = activeDraftId && drafts.some((draft) => draft.id === activeDraftId)
+      ? activeDraftId
+      : createDraftId()
+    const nextDraft = stageToDraft(stageJson, stageName, existingId)
+
+    setDrafts((current) => {
+      const withoutCurrent = current.filter((draft) => draft.id !== existingId)
+      return [nextDraft, ...withoutCurrent].slice(0, 24)
+    })
+    setActiveDraftId(existingId)
+    setFeedback(`${nextDraft.name} saved as draft`)
+  }
+
+  const duplicateDraft = () => {
+    const nextName = `${stageName.trim() || 'Untitled Stage'} copy`
+    const nextDraft = stageToDraft(stageJson, nextName)
+    setDrafts((current) => [nextDraft, ...current].slice(0, 24))
+    setActiveDraftId(nextDraft.id)
+    setStageName(nextName)
+    setFeedback(`${nextName} duplicated as draft`)
+  }
+
+  const loadDraft = (draftId: string) => {
+    const draft = drafts.find((item) => item.id === draftId)
+    if (!draft) {
+      setFeedback('Draft not found')
+      return
+    }
+
+    const nextInitial = rowsToGrid(draft.initial)
+    setStageName(draft.name)
+    setGridSize(draft.gridSize)
+    setInitialGrid(nextInitial)
+    setTargetGrid(rowsToGrid(draft.target))
+    resetPreviewTo(nextInitial)
+    setSelectedCell({ board: 'initial', row: 0, col: 0 })
+    setActiveBoard('initial')
+    setActiveDraftId(draft.id)
+    setImportError('')
+    setImportText('')
+    setFeedback(`${draft.name} loaded`)
+  }
+
+  const deleteDraft = (draftId: string) => {
+    const draft = drafts.find((item) => item.id === draftId)
+    setDrafts((current) => current.filter((item) => item.id !== draftId))
+    if (activeDraftId === draftId) {
+      setActiveDraftId('')
+    }
+    setFeedback(draft ? `${draft.name} deleted` : 'Draft deleted')
+  }
+
+  useEffect(() => {
+    writeDraftsToStorage(drafts)
+  }, [drafts])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const tagName = target?.tagName
+      const isTyping =
+        target?.isContentEditable ||
+        tagName === 'INPUT' ||
+        tagName === 'TEXTAREA' ||
+        tagName === 'SELECT'
+
+      if (isTyping) {
+        return
+      }
+
+      const key = event.key.toLowerCase()
+
+      if ((event.ctrlKey || event.metaKey) && key === 'z') {
+        event.preventDefault()
+        setPreviewHistory((history) => {
+          const previous = history[history.length - 1]
+          if (!previous) {
+            setFeedback('Preview undo has no history')
+            return history
+          }
+
+          setPreviewGrid(previous)
+          setFeedback('Preview undo')
+          return history.slice(0, -1)
+        })
+        return
+      }
+
+      if (key === 'v') {
+        event.preventDefault()
+        setEditMode('select')
+        setFeedback('Select mode')
+        return
+      }
+
+      if (key === 'b') {
+        event.preventDefault()
+        setEditMode('paint')
+        setFeedback('Paint mode')
+        return
+      }
+
+      if (key === 'q') {
+        event.preventDefault()
+        setAssignment((current) => rotateAssignmentCounterClockwise(current))
+        setFeedback('Preview colors rotated counter-clockwise')
+        return
+      }
+
+      if (key === 'e') {
+        event.preventDefault()
+        setAssignment((current) => rotateAssignmentClockwise(current))
+        setFeedback('Preview colors rotated clockwise')
+        return
+      }
+
+      const shortcutBrush = shortcutBrushes[event.key]
+      if (shortcutBrush) {
+        event.preventDefault()
+        setBrush(shortcutBrush)
+        setEditMode('paint')
+        setFeedback(`Brush set to ${shortcutBrush}`)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [])
+
   return (
     <main className="app-shell" onPointerUp={() => setIsPainting(false)} onPointerLeave={() => setIsPainting(false)}>
       <header className="topbar">
@@ -646,23 +887,54 @@ function App() {
             <span>Palette</span>
             <strong>{brush}</strong>
           </div>
+          <div className="tool-section first">
+            <span className="section-label">Edit Mode</span>
+            <div className="segmented mode-switch" role="group" aria-label="Edit mode">
+              <button
+                type="button"
+                className={editMode === 'select' ? 'active' : ''}
+                onClick={() => {
+                  setEditMode('select')
+                  setFeedback('Select mode')
+                }}
+              >
+                <MousePointer2 size={15} />
+                Select
+              </button>
+              <button
+                type="button"
+                className={editMode === 'paint' ? 'active' : ''}
+                onClick={() => {
+                  setEditMode('paint')
+                  setFeedback('Paint mode')
+                }}
+              >
+                <Brush size={15} />
+                Paint
+              </button>
+            </div>
+            <p className="shortcut-hint">V select / B paint / 1-5 brush / Q,E preview / Ctrl+Z undo</p>
+          </div>
           <div className="palette-grid" role="list" aria-label="Cell symbol palette">
-            {brushSymbols.map((symbol) => (
+            {brushSymbols.map((symbol, index) => (
               <button
                 key={symbol}
                 type="button"
                 className={`swatch ${cellMeta[symbol].className} ${brush === symbol ? 'selected' : ''}`}
-                onClick={() => setBrush(symbol)}
+                onClick={() => {
+                  setBrush(symbol)
+                  setFeedback(`Brush set to ${symbol}`)
+                }}
                 aria-pressed={brush === symbol}
               >
                 <span>{cellMeta[symbol].short}</span>
-                <small>{cellMeta[symbol].label}</small>
+                <small>{index + 1} / {cellMeta[symbol].label}</small>
               </button>
             ))}
           </div>
 
           <div className="tool-section">
-            <span className="section-label">Brush Board</span>
+            <span className="section-label">Active Board</span>
             <div className="segmented" role="group" aria-label="Active board">
               <button
                 type="button"
@@ -679,18 +951,6 @@ function App() {
                 Target
               </button>
             </div>
-            <button type="button" className="wide-action" onClick={() => fillBoard(activeBoard)}>
-              <PaintBucket size={16} />
-              Fill active board
-            </button>
-            <button type="button" className="wide-action" onClick={() => clearBoard(activeBoard)}>
-              <Eraser size={16} />
-              Clear active board
-            </button>
-            <button type="button" className="wide-action" onClick={copyInitialToTarget}>
-              <Clipboard size={16} />
-              Initial to Target
-            </button>
             <button type="button" className="wide-action subtle" onClick={resetSample}>
               <RotateCcw size={16} />
               Restore lock sample
@@ -702,6 +962,15 @@ function App() {
             selectedSymbol={selectedSymbol ?? 'W'}
             selectedState={selectedState}
             onChange={updateSelectedCell}
+          />
+
+          <DraftsPanel
+            drafts={drafts}
+            activeDraft={activeDraft}
+            onSave={saveDraft}
+            onDuplicate={duplicateDraft}
+            onLoad={loadDraft}
+            onDelete={deleteDraft}
           />
 
           <div className="status-box">
@@ -721,7 +990,11 @@ function App() {
             selectedCell={selectedCell}
             isActive={activeBoard === 'initial'}
             isPainting={isPainting}
+            editMode={editMode}
+            brush={brush}
             onActivate={() => setActiveBoard('initial')}
+            onFill={() => fillBoard('initial')}
+            onClear={() => clearBoard('initial')}
             onPaint={paintCell}
             onSelect={(row, col) => setSelectedCell({ board: 'initial', row, col })}
             onStartPaint={() => setIsPainting(true)}
@@ -733,7 +1006,12 @@ function App() {
             selectedCell={selectedCell}
             isActive={activeBoard === 'target'}
             isPainting={isPainting}
+            editMode={editMode}
+            brush={brush}
             onActivate={() => setActiveBoard('target')}
+            onFill={() => fillBoard('target')}
+            onClear={() => clearBoard('target')}
+            onCopyInitial={copyInitialToTarget}
             onPaint={paintCell}
             onSelect={(row, col) => setSelectedCell({ board: 'target', row, col })}
             onStartPaint={() => setIsPainting(true)}
@@ -774,6 +1052,85 @@ function App() {
         </aside>
       </section>
     </main>
+  )
+}
+
+function DraftsPanel({
+  drafts,
+  activeDraft,
+  onSave,
+  onDuplicate,
+  onLoad,
+  onDelete,
+}: {
+  drafts: StageDraft[]
+  activeDraft: StageDraft | undefined
+  onSave: () => void
+  onDuplicate: () => void
+  onLoad: (draftId: string) => void
+  onDelete: (draftId: string) => void
+}) {
+  const selectedId = activeDraft?.id ?? drafts[0]?.id ?? ''
+
+  return (
+    <div className="drafts-panel">
+      <div className="panel-heading compact">
+        <span>Drafts</span>
+        <strong>{drafts.length}</strong>
+      </div>
+      <div className="draft-actions">
+        <button type="button" className="wide-action" onClick={onSave}>
+          <Save size={16} />
+          Save Draft
+        </button>
+        <button type="button" className="wide-action" onClick={onDuplicate}>
+          <CopyPlus size={16} />
+          Duplicate
+        </button>
+      </div>
+
+      {drafts.length > 0 ? (
+        <div className="draft-list">
+          <label className="field inline-field">
+            <span>Saved Draft</span>
+            <select value={selectedId} onChange={(event) => onLoad(event.target.value)}>
+              {drafts.map((draft) => (
+                <option key={draft.id} value={draft.id}>
+                  {draft.name} / {draft.gridSize}x{draft.gridSize}
+                </option>
+              ))}
+            </select>
+          </label>
+          {activeDraft ? (
+            <p className="draft-meta">Current: {activeDraft.name} / {formatDraftTime(activeDraft.updatedAt)}</p>
+          ) : (
+            <p className="draft-meta">Select a draft to load it.</p>
+          )}
+          <div className="draft-actions">
+            <button
+              type="button"
+              className="wide-action"
+              disabled={!selectedId}
+              onClick={() => onLoad(selectedId)}
+            >
+              <FolderOpen size={16} />
+              Load
+            </button>
+            <button
+              type="button"
+              className="wide-action danger"
+              disabled={!selectedId}
+              onClick={() => onDelete(selectedId)}
+            >
+              <Trash2 size={16} />
+              Delete
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className="draft-empty">No drafts yet. Save the current stage to keep it in this browser.</p>
+      )}
+    </div>
   )
 }
 
@@ -908,7 +1265,12 @@ function EditableBoard({
   selectedCell,
   isActive,
   isPainting,
+  editMode,
+  brush,
   onActivate,
+  onFill,
+  onClear,
+  onCopyInitial,
   onPaint,
   onSelect,
   onStartPaint,
@@ -919,19 +1281,56 @@ function EditableBoard({
   selectedCell: SelectedCell
   isActive: boolean
   isPainting: boolean
+  editMode: EditorMode
+  brush: BrushSymbol
   onActivate: () => void
+  onFill: () => void
+  onClear: () => void
+  onCopyInitial?: () => void
   onPaint: (board: BoardName, row: number, col: number) => void
   onSelect: (row: number, col: number) => void
   onStartPaint: () => void
 }) {
+  const handleCellPointerDown = (row: number, col: number) => {
+    onSelect(row, col)
+
+    if (editMode === 'paint') {
+      onStartPaint()
+      onPaint(board, row, col)
+    }
+  }
+
+  const handleCellPointerEnter = (row: number, col: number) => {
+    if (editMode === 'paint' && isPainting) {
+      onSelect(row, col)
+      onPaint(board, row, col)
+    }
+  }
+
   return (
-    <article className={`board-card ${isActive ? 'active' : ''}`} onPointerDown={onActivate}>
+    <article className={`board-card ${isActive ? 'active' : ''} mode-${editMode}`} onPointerDown={onActivate}>
       <div className="board-header">
         <div>
           <h2>{title}</h2>
           <p>{grid.length} rows / {grid[0]?.length ?? 0} columns</p>
         </div>
-        <span>{isActive ? 'Active' : 'Click to edit'}</span>
+        <span>{isActive ? `${editMode} / ${brush}` : 'Click to edit'}</span>
+      </div>
+      <div className="board-tools" aria-label={`${title} quick actions`}>
+        <button type="button" className="mini-action" onClick={onFill}>
+          <PaintBucket size={15} />
+          Fill {brush}
+        </button>
+        <button type="button" className="mini-action" onClick={onClear}>
+          <Eraser size={15} />
+          Clear
+        </button>
+        {onCopyInitial ? (
+          <button type="button" className="mini-action" onClick={onCopyInitial}>
+            <Clipboard size={15} />
+            Initial to Target
+          </button>
+        ) : null}
       </div>
       <div
         className="stage-grid"
@@ -949,16 +1348,9 @@ function EditableBoard({
                 className={`stage-cell ${getCellClass(cell)} ${isSelected ? 'selected-cell' : ''}`}
                 onPointerDown={(event) => {
                   event.preventDefault()
-                  onStartPaint()
-                  onSelect(rowIndex, colIndex)
-                  onPaint(board, rowIndex, colIndex)
+                  handleCellPointerDown(rowIndex, colIndex)
                 }}
-                onPointerEnter={() => {
-                  if (isPainting) {
-                    onSelect(rowIndex, colIndex)
-                    onPaint(board, rowIndex, colIndex)
-                  }
-                }}
+                onPointerEnter={() => handleCellPointerEnter(rowIndex, colIndex)}
                 role="gridcell"
                 aria-label={`${title} row ${rowIndex + 1} column ${colIndex + 1}: ${getCellLabel(cell)}`}
               >
